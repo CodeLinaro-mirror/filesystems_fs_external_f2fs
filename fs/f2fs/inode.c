@@ -225,7 +225,7 @@ static bool sanity_check_compress_inode(struct inode *inode,
 			SECTOR_TO_BLOCK(sbi, inode->i_blocks));
 		return false;
 	}
-	if (ri->i_log_cluster_size < MIN_COMPRESS_LOG_SIZE ||
+	if (ri->i_log_cluster_size < min_compress_log_size(sbi) ||
 		ri->i_log_cluster_size > MAX_COMPRESS_LOG_SIZE) {
 		f2fs_warn(sbi,
 			"%s: inode (ino=%llx) has unsupported log cluster size: %u, run fsck to fix",
