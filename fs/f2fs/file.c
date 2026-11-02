@@ -3312,6 +3312,20 @@ do_map:
 						cnt < BLKS_PER_SEG(sbi)) {
 			struct folio *folio;
 
+			/*
+			 * Read the whole folio in one I/O; otherwise each block
+			 * of a multi-block folio is read synchronously below.
+			 */
+			if (f2fs_has_multiblock_folios(inode)) {
+				folio = read_mapping_folio(inode->i_mapping,
+					f2fs_lblk_to_folio_index(sbi, idx), filp);
+				if (IS_ERR(folio)) {
+					err = PTR_ERR(folio);
+					goto clear_out;
+				}
+				folio_put(folio);
+			}
+
 			folio = f2fs_get_lock_data_folio(inode, idx, true);
 			if (IS_ERR(folio)) {
 				err = PTR_ERR(folio);
@@ -3320,9 +3334,13 @@ do_map:
 
 			f2fs_folio_wait_writeback(folio, true, true);
 
-			f2fs_ffs_mark_subrange_dirty(folio,
-				offset_in_folio(folio, (loff_t)idx << PAGE_SHIFT),
-				PAGE_SIZE);
+			if (f2fs_is_multiblock_folio(sbi, folio)) {
+				size_t off = f2fs_folio_byte_offset(sbi, folio, idx);
+
+				f2fs_ffs_mark_subrange_dirty(folio, off,
+							     F2FS_BLKSIZE(sbi));
+			}
+
 			folio_mark_dirty(folio);
 			folio_set_f2fs_gcing(folio);
 			f2fs_folio_put(folio, true);
@@ -3362,9 +3380,6 @@ static int f2fs_ioc_defragment(struct file *filp, unsigned long arg)
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct f2fs_defragment range;
 	int err;
-
-	if (f2fs_has_subpage_blocks(sbi))
-		return -EOPNOTSUPP;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
