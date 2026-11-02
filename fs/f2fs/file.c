@@ -3501,17 +3501,6 @@ static int f2fs_move_file_range(struct file *file_in, loff_t pos_in,
 	if (ret)
 		goto out_unlock;
 
-	/* write out all dirty pages from offset */
-	ret = filemap_write_and_wait_range(src->i_mapping,
-					pos_in, pos_in + len);
-	if (ret)
-		goto out_unlock;
-
-	ret = filemap_write_and_wait_range(dst->i_mapping,
-					pos_out, pos_out + len);
-	if (ret)
-		goto out_unlock;
-
 	f2fs_balance_fs(sbi, true);
 
 	f2fs_down_write(&F2FS_I(src)->i_gc_rwsem[WRITE]);
@@ -3520,6 +3509,31 @@ static int f2fs_move_file_range(struct file *file_in, loff_t pos_in,
 		if (!f2fs_down_write_trylock(&F2FS_I(dst)->i_gc_rwsem[WRITE]))
 			goto out_src;
 	}
+
+	/*
+	 * Hold invalidate_lock across writeback, truncation and the block
+	 * exchange so neither faults nor readahead can repopulate the page
+	 * cache with pre-exchange data.
+	 */
+	filemap_invalidate_lock_two(src->i_mapping, dst->i_mapping);
+
+	/* write out all dirty pages from offset */
+	ret = filemap_write_and_wait_range(src->i_mapping,
+					round_down(pos_in, PAGE_SIZE),
+					round_up(pos_in + len, PAGE_SIZE) - 1);
+	if (ret)
+		goto out_inval;
+
+	ret = filemap_write_and_wait_range(dst->i_mapping,
+					round_down(pos_out, PAGE_SIZE),
+					round_up(pos_out + len, PAGE_SIZE) - 1);
+	if (ret)
+		goto out_inval;
+
+	truncate_pagecache_range(src, round_down(pos_in, PAGE_SIZE),
+				 round_up(pos_in + len, PAGE_SIZE) - 1);
+	truncate_pagecache_range(dst, round_down(pos_out, PAGE_SIZE),
+				 round_up(pos_out + len, PAGE_SIZE) - 1);
 
 	f2fs_lock_op(sbi, &lc);
 	ret = __exchange_data_block(src, dst, F2FS_BYTES_TO_BLK(sbi, pos_in),
@@ -3533,6 +3547,12 @@ static int f2fs_move_file_range(struct file *file_in, loff_t pos_in,
 			f2fs_i_size_write(dst, dst_osize);
 	}
 	f2fs_unlock_op(sbi, &lc);
+
+	/* the exchange may have extended dst past its old EOF folio */
+	if (i_size_read(dst) > dst_osize)
+		pagecache_isize_extended(dst, dst_osize, i_size_read(dst));
+out_inval:
+	filemap_invalidate_unlock_two(src->i_mapping, dst->i_mapping);
 
 	if (src != dst)
 		f2fs_up_write(&F2FS_I(dst)->i_gc_rwsem[WRITE]);
@@ -3587,9 +3607,6 @@ static int __f2fs_ioc_move_range(struct file *filp,
 static int f2fs_ioc_move_range(struct file *filp, unsigned long arg)
 {
 	struct f2fs_move_range range;
-
-	if (f2fs_has_subpage_blocks(F2FS_I_SB(file_inode(filp))))
-		return -EOPNOTSUPP;
 
 	if (copy_from_user(&range, (struct f2fs_move_range __user *)arg,
 							sizeof(range)))
