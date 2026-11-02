@@ -979,9 +979,9 @@ void f2fs_delete_entry(struct f2fs_dir_entry *dentry, void *dentry_block,
 		if (!f2fs_has_subpage_blocks(sbi)) {
 			folio_clear_uptodate(folio);
 			folio_detach_private(folio);
-			inode_dec_dirty_block(dir);
 		}
 
+		inode_sub_dirty_blocks(dir, f2fs_blocks_per_folio(sbi, folio));
 		f2fs_remove_dirty_inode(dir);
 	}
 keep_dirty:

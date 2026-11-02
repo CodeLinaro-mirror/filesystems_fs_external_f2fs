@@ -1608,13 +1608,12 @@ retry:
 			f2fs_ffs_mark_subrange_dirty(folio, foff, F2FS_BLKSIZE(sbi));
 		folio_mark_dirty(folio);
 		if (folio_clear_dirty_for_io(folio)) {
-			if (!has_ffs) {
-				inode_dec_dirty_block(inode);
-				f2fs_remove_dirty_inode(inode);
-			} else if (f2fs_ffs_clear_subrange_dirty_and_test(folio,
-						foff, F2FS_BLKSIZE(sbi))) {
+			inode_sub_dirty_blocks(inode, f2fs_blocks_per_folio(sbi, folio));
+			f2fs_remove_dirty_inode(inode);
+			if (has_ffs &&
+			    f2fs_ffs_clear_subrange_dirty_and_test(folio, foff,
+							F2FS_BLKSIZE(sbi)))
 				folio_mark_dirty(folio);
-			}
 		}
 
 		folio_set_f2fs_gcing(folio);

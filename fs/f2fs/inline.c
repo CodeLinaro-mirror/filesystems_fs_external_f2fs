@@ -196,10 +196,15 @@ int f2fs_convert_inline_folio(struct dnode_of_data *dn, struct folio *folio)
 	folio_start_writeback(folio);
 	fio.old_blkaddr = dn->data_blkaddr;
 	set_inode_flag(dn->inode, FI_HOT_DATA);
+	if (f2fs_is_multiblock_folio(fio.sbi, folio)) {
+		struct f2fs_folio_state *ffs = f2fs_ffs_find_or_alloc(folio);
+
+		atomic_inc(&ffs->write_blocks_pending);
+	}
 	f2fs_outplace_write_data(dn, &fio);
 	f2fs_folio_wait_writeback(folio, true, true);
 	if (dirty) {
-		inode_dec_dirty_block(dn->inode);
+		inode_sub_dirty_blocks(dn->inode, f2fs_blocks_per_folio(fio.sbi, folio));
 		f2fs_remove_dirty_inode(dn->inode);
 	}
 
