@@ -240,6 +240,13 @@ static vm_fault_t f2fs_vm_page_mkwrite(struct vm_fault *vmf)
 	nr = DIV_ROUND_UP(dirty_len, PAGE_SIZE);
 
 	if (f2fs_has_subpage_blocks(sbi)) {
+		if (f2fs_is_pinned_file(inode) &&
+		    !f2fs_overwrite_io(inode, folio_pos(folio), dirty_len)) {
+			folio_unlock(folio);
+			err = -EIO;
+			goto out_sem;
+		}
+
 		/*
 		 * A writable PTE covers the whole base folio.  Like ext4's
 		 * block_page_mkwrite(), prepare every filesystem block through EOF
@@ -2280,8 +2287,7 @@ static long f2fs_fallocate(struct file *file, int mode,
 
 	if (f2fs_has_subpage_blocks(F2FS_I_SB(inode))) {
 		if ((mode & (FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE)) ||
-		    f2fs_is_pinned_file(inode) || f2fs_is_atomic_file(inode) ||
-		    f2fs_compressed_file(inode)) {
+		    f2fs_is_atomic_file(inode) || f2fs_compressed_file(inode)) {
 			ret = -EOPNOTSUPP;
 			goto out;
 		}
@@ -3822,9 +3828,6 @@ static int f2fs_ioc_set_pin_file(struct file *filp, unsigned long arg)
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	__u32 pin;
 	int ret = 0;
-
-	if (f2fs_has_subpage_blocks(sbi))
-		return -EOPNOTSUPP;
 
 	if (get_user(pin, (__u32 __user *)arg))
 		return -EFAULT;
