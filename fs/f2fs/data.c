@@ -4282,7 +4282,7 @@ static int f2fs_write_cache_pages(struct address_space *mapping,
 
 	folio_batch_init(&fbatch);
 
-	if (get_dirty_pages(mapping->host) <=
+	if (get_dirty_blocks(mapping->host) <=
 				SM_I(F2FS_M_SB(mapping))->min_hot_blocks)
 		set_inode_flag(mapping->host, FI_HOT_DATA);
 	else
@@ -4527,7 +4527,7 @@ static int f2fs_write_cache_folios(struct address_space *mapping,
 	bool op_locked = false;
 	bool retry = false;
 
-	if (get_dirty_pages(inode) <= SM_I(sbi)->min_hot_blocks)
+	if (get_dirty_blocks(inode) <= SM_I(sbi)->min_hot_blocks)
 		set_inode_flag(inode, FI_HOT_DATA);
 	else
 		clear_inode_flag(inode, FI_HOT_DATA);
@@ -4791,7 +4791,7 @@ static inline bool __should_serialize_io(struct inode *inode,
 		return true;
 	if (wbc->sync_mode != WB_SYNC_ALL)
 		return true;
-	if (get_dirty_pages(inode) >= SM_I(F2FS_I_SB(inode))->min_seq_blocks)
+	if (get_dirty_blocks(inode) >= SM_I(F2FS_I_SB(inode))->min_seq_blocks)
 		return true;
 	return false;
 }
@@ -4830,7 +4830,7 @@ static int __f2fs_write_data_pages(struct address_space *mapping,
 	bool locked = false;
 
 	/* skip writing if there is no dirty page in this inode */
-	if (!get_dirty_pages(inode) && wbc->sync_mode == WB_SYNC_NONE)
+	if (!get_dirty_blocks(inode) && wbc->sync_mode == WB_SYNC_NONE)
 		return 0;
 
 	/* during POR, we don't need to trigger writepage at all. */
@@ -4839,7 +4839,7 @@ static int __f2fs_write_data_pages(struct address_space *mapping,
 
 	if ((S_ISDIR(inode->i_mode) || IS_NOQUOTA(inode)) &&
 			wbc->sync_mode == WB_SYNC_NONE &&
-			get_dirty_pages(inode) < nr_caches_to_skip(sbi, DATA) &&
+			get_dirty_blocks(inode) < nr_caches_to_skip(sbi, DATA) &&
 			f2fs_available_free_memory(sbi, DIRTY_DENTS))
 		goto skip_write;
 
@@ -4898,7 +4898,8 @@ static int __f2fs_write_data_pages(struct address_space *mapping,
 	return ret;
 
 skip_write:
-	wbc->pages_skipped += get_dirty_pages(inode);
+	wbc->pages_skipped += get_dirty_blocks(inode) >>
+					F2FS_LOG_BLKS_PER_PAGE(sbi);
 	update_skipped_write(sbi, wbc);
 	trace_f2fs_writepages(mapping->host, wbc, DATA);
 	return 0;
