@@ -3198,13 +3198,27 @@ bool f2fs_ffs_dirty_blk_range(struct folio *folio, unsigned int from,
 
 static bool find_next_valid_block(const struct folio *folio,
 				  size_t orig_off, size_t *need_off,
-				  size_t len)
+				  size_t len, bool read_full)
 {
 	struct f2fs_sb_info *sbi = F2FS_M_SB(folio->mapping);
 	size_t start = orig_off;
 	size_t end = start + len;
 	size_t head, tail;
 	pgoff_t index;
+
+	/* Find every block that is not uptodate, not only the partial ones. */
+	if (read_full) {
+		for (head = round_down(*need_off, F2FS_BLKSIZE(sbi)); head < end;
+		     head += F2FS_BLKSIZE(sbi)) {
+			index = f2fs_folio_lblk(sbi, folio) +
+				F2FS_BYTES_TO_BLK(sbi, head);
+			if (!f2fs_ffs_test_blk_uptodate(folio, index)) {
+				*need_off = head;
+				return true;
+			}
+		}
+		return false;
+	}
 
 	if (start & (F2FS_BLKSIZE(sbi) - 1)) {
 		head = round_down(start, F2FS_BLKSIZE(sbi));
@@ -5222,7 +5236,8 @@ static bool f2fs_balance_fs_folio_locked(struct folio *folio,
 
 static int prepare_large_folio_write_begin(struct inode *inode,
 					  struct folio *folio, loff_t pos,
-					  unsigned int len, bool *need_balance)
+					  unsigned int len, bool read_full,
+					  bool preallocated, bool *need_balance)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct f2fs_folio_state *ffs;
@@ -5238,8 +5253,7 @@ static int prepare_large_folio_write_begin(struct inode *inode,
 	 * Reserve blocks without f2fs_balance_fs() since the folio is locked;
 	 * the caller balances after unlocking it if *need_balance is set.
 	 */
-	if (!is_inode_flag_set(inode, FI_PREALLOCATED_ALL) &&
-	    !IS_DEVICE_ALIASING(inode)) {
+	if (!preallocated && !IS_DEVICE_ALIASING(inode)) {
 		pgoff_t first = F2FS_BYTES_TO_BLK(sbi, pos);
 		pgoff_t last = F2FS_BLK_ALIGN(sbi, pos + len);
 		pgoff_t idx;
@@ -5261,14 +5275,15 @@ static int prepare_large_folio_write_begin(struct inode *inode,
 	/* Skip read if the folio is already fully uptodate or the write
 	 * covers the entire folio.
 	 */
-	if (folio_test_uptodate(folio) || len == folio_size(folio))
+	if (folio_test_uptodate(folio) ||
+	    (!read_full && len == folio_size(folio)))
 		return 0;
 
 	/*
 	 * Skip read if the write starts at a block boundary and reaches EOF,
 	 * and zero the rest of the folio instead.
 	 */
-	if (!f2fs_verity_in_progress(inode) &&
+	if (!read_full && !f2fs_verity_in_progress(inode) &&
 	    !(pos & (F2FS_BLKSIZE(sbi) - 1)) && (pos + len) >= i_size_read(inode)) {
 		size_t zoff = ori_off + len;
 
@@ -5281,7 +5296,7 @@ static int prepare_large_folio_write_begin(struct inode *inode,
 	f2fs_bug_on(sbi, f2fs_has_inline_data(inode));
 
 	while (find_next_valid_block(folio, ori_off,
-				     &need_off, len)) {
+				     &need_off, len, read_full)) {
 		struct dnode_of_data dn;
 		pgoff_t index = f2fs_folio_lblk(sbi, folio) +
 				F2FS_BYTES_TO_BLK(sbi, need_off);
@@ -5380,6 +5395,20 @@ balance:
 	}
 
 	return 0;
+}
+
+int f2fs_prepare_subpage_mkwrite(struct inode *inode, struct folio *folio,
+				 loff_t pos, unsigned int len)
+{
+	bool need_balance = false;
+
+	/*
+	 * mkwrite runs without inode_lock, so FI_PREALLOCATED_ALL may have
+	 * been set by a concurrent write() for a different range. It calls
+	 * f2fs_balance_fs() before locking the folio, so ignore need_balance.
+	 */
+	return prepare_large_folio_write_begin(inode, folio, pos, len, true,
+					       false, &need_balance);
 }
 
 static int f2fs_write_begin(const struct kiocb *iocb,
@@ -5490,7 +5519,9 @@ repeat:
 					mapping, folio, pos, len, retried);
 	} else {
 		err = prepare_large_folio_write_begin(inode, folio, pos, blen,
-						      &need_balance);
+				false,
+				is_inode_flag_set(inode, FI_PREALLOCATED_ALL),
+				&need_balance);
 	}
 	if (err) {
 		if (err == -EAGAIN) {
@@ -5566,6 +5597,7 @@ static int f2fs_write_end(const struct kiocb *iocb,
 			struct folio *folio, void *fsdata)
 {
 	struct inode *inode = folio->mapping->host;
+	loff_t old_size = i_size_read(inode);
 
 	trace_f2fs_write_end(inode, pos, len, copied);
 
@@ -5595,6 +5627,8 @@ static int f2fs_write_end(const struct kiocb *iocb,
 		if (pos + copied > i_size_read(inode) &&
 				!f2fs_verity_in_progress(inode))
 			f2fs_i_size_write(inode, pos + copied);
+		if (i_size_read(inode) > old_size)
+			pagecache_isize_extended(inode, old_size, pos);
 		return copied;
 	}
 #endif
@@ -5620,6 +5654,14 @@ static int f2fs_write_end(const struct kiocb *iocb,
 unlock_out:
 	f2fs_folio_put(folio, true);
 	f2fs_update_time(F2FS_I_SB(inode), REQ_TIME);
+
+	/*
+	 * The folio straddling the old EOF may still be mapped writable, and
+	 * the blocks between the old EOF and pos in it are not prepared.
+	 * Write-protect it so that mmap stores to them fault.
+	 */
+	if (i_size_read(inode) > old_size)
+		pagecache_isize_extended(inode, old_size, pos);
 	return copied;
 }
 
